@@ -9,8 +9,16 @@ El proyecto está pensado para montarlo rápido en un home server, especialmente
 Ejecutar directamente desde el host de Proxmox VE:
 
 ```bash
-bash -c "$(curl -fsSL https://raw.githubusercontent.com/yansyrod/Automatizacion/main/install-vault.sh)"
+bash <(curl -fsSL https://raw.githubusercontent.com/yansyrod/Automatizacion/main/install-vault.sh)
 ```
+
+También puedes usar esta variante:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/yansyrod/Automatizacion/main/install-vault.sh | bash
+```
+
+> Nota: no uses `bash -c "$(curl ...)"` para este script, porque el archivo es grande y puede provocar el error `/usr/bin/bash: Argument list too long`.
 
 ## Qué instala
 
@@ -118,7 +126,7 @@ bash install-vault.sh
 ## Seguridad
 
 - El script debe ejecutarse como administrador en el host Proxmox.
-- Revisa siempre el contenido antes de ejecutar scripts remotos con `curl | bash`.
+- Revisa siempre el contenido antes de ejecutar scripts remotos.
 - La app está pensada para estar detrás de HTTPS, por ejemplo mediante Cloudflare Tunnel o reverse proxy.
 - La cookie de sesión no se marca como `Secure` porque el diseño contempla TLS terminado en Cloudflare o proxy externo y HTTP interno hacia el contenedor.
 
