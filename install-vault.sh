@@ -474,7 +474,7 @@ define('DB_NAME', 'vault');
 define('DB_USER', 'vault');
 define('DB_PASS', '${DB_PASS}');
 define('APP_NAME', '${APP_NAME}');
-define('APP_VERSION', '2.0.0');
+define('APP_VERSION', '2.1.0-phase1-onedrive');
 define('STORAGE_PATH', '/var/www/vault/storage/uploads');
 define('THUMB_PATH', '/var/www/vault/storage/thumbnails');
 define('LOG_PATH', '/var/www/vault/logs');
@@ -550,7 +550,7 @@ CREATE TABLE IF NOT EXISTS users (
   totp_secret VARCHAR(64) DEFAULT NULL,
   totp_enabled TINYINT(1) DEFAULT 0,
   totp_backup TEXT DEFAULT NULL,
-  theme ENUM('dark','light') DEFAULT 'dark',
+  theme ENUM('dark','light') DEFAULT 'light',
   last_login DATETIME DEFAULT NULL,
   created_at DATETIME DEFAULT CURRENT_TIMESTAMP
 );
@@ -760,7 +760,14 @@ class FileManager {
     public function __construct(){$this->db=Database::getInstance();}
 
     public function listFolder(int $uid,?int $pid):array{
-        $sql="SELECT id,name,type,mime_type,size,thumbnail,is_starred,created_at,updated_at FROM files WHERE user_id=? AND is_trashed=0 AND ".($pid?"parent_id=?":"parent_id IS NULL")." ORDER BY type='folder' DESC, name ASC";
+        $sql="SELECT f.id,f.name,f.type,f.mime_type,f.size,f.thumbnail,f.is_starred,f.created_at,f.updated_at,
+                     u.display_name AS owner_name,u.username AS owner_username,
+                     (SELECT COUNT(*) FROM shares s WHERE s.file_id=f.id) AS share_count,
+                     CASE WHEN f.type='folder' THEN (SELECT COUNT(*) FROM files c WHERE c.parent_id=f.id AND c.user_id=f.user_id AND c.is_trashed=0) ELSE NULL END AS item_count
+              FROM files f
+              JOIN users u ON u.id=f.user_id
+              WHERE f.user_id=? AND f.is_trashed=0 AND ".($pid?"f.parent_id=?":"f.parent_id IS NULL")."
+              ORDER BY f.type='folder' DESC, f.name ASC";
         return $this->db->fetchAll($sql,$pid?[$uid,$pid]:[$uid]);
     }
     public function getBreadcrumb(int $uid,?int $fid):array{
@@ -903,7 +910,7 @@ class FileManager {
     }
     public function toggleStarOn(int $uid,int $id):void{$this->db->execute("UPDATE files SET is_starred=1 WHERE id=? AND user_id=?",[$id,$uid]);}
     public function rename(int $uid,int $id,string $name):void{$this->db->execute("UPDATE files SET name=? WHERE id=? AND user_id=?",[$this->san($name),$id,$uid]);}
-    public function search(int $uid,string $q):array{return $this->db->fetchAll("SELECT id,name,type,mime_type,size,thumbnail,created_at FROM files WHERE user_id=? AND is_trashed=0 AND name LIKE ? ORDER BY type DESC,name ASC LIMIT 50",[$uid,"%$q%"]);}
+    public function search(int $uid,string $q):array{return $this->db->fetchAll("SELECT f.id,f.name,f.type,f.mime_type,f.size,f.thumbnail,f.is_starred,f.created_at,f.updated_at,u.display_name AS owner_name,u.username AS owner_username,(SELECT COUNT(*) FROM shares s WHERE s.file_id=f.id) AS share_count,CASE WHEN f.type='folder' THEN (SELECT COUNT(*) FROM files c WHERE c.parent_id=f.id AND c.user_id=f.user_id AND c.is_trashed=0) ELSE NULL END AS item_count FROM files f JOIN users u ON u.id=f.user_id WHERE f.user_id=? AND f.is_trashed=0 AND f.name LIKE ? ORDER BY f.type DESC,f.name ASC LIMIT 50",[$uid,"%$q%"]);}
     public function createShare(int $uid,int $fid,?string $pass,?string $exp,?int $maxdl):string{
         $f=$this->db->fetch("SELECT id FROM files WHERE id=? AND user_id=? AND is_trashed=0",[$fid,$uid]);if(!$f)throw new NotFoundException('No encontrado');
         $tok=bin2hex(random_bytes(16));$hp=$pass?password_hash($pass,PASSWORD_BCRYPT):null;
@@ -984,7 +991,7 @@ class Router {
     }
     private function files(string $m,?int $id,string $a):void{
         $u=Auth::requireAuth();$fm=new FileManager();
-        if($m==='GET'&&$a==='starred'){$f=Database::getInstance()->fetchAll("SELECT id,name,type,mime_type,size,thumbnail,created_at FROM files WHERE user_id=? AND is_starred=1 AND is_trashed=0 ORDER BY name",[$u['id']]);echo json_encode(['ok'=>true,'files'=>$f]);}
+        if($m==='GET'&&$a==='starred'){$f=Database::getInstance()->fetchAll("SELECT f.id,f.name,f.type,f.mime_type,f.size,f.thumbnail,f.is_starred,f.created_at,f.updated_at,u.display_name AS owner_name,u.username AS owner_username,(SELECT COUNT(*) FROM shares s WHERE s.file_id=f.id) AS share_count,CASE WHEN f.type='folder' THEN (SELECT COUNT(*) FROM files c WHERE c.parent_id=f.id AND c.user_id=f.user_id AND c.is_trashed=0) ELSE NULL END AS item_count FROM files f JOIN users u ON u.id=f.user_id WHERE f.user_id=? AND f.is_starred=1 AND f.is_trashed=0 ORDER BY f.name",[$u['id']]);echo json_encode(['ok'=>true,'files'=>$f]);}
         elseif($m==='GET'&&!$id){$pid=isset($_GET['folder'])?(int)$_GET['folder']:null;echo json_encode(['ok'=>true,'files'=>$fm->listFolder($u['id'],$pid),'breadcrumb'=>$fm->getBreadcrumb($u['id'],$pid)]);}
         elseif($m==='DELETE'&&$id){$fm->trash($u['id'],$id);echo json_encode(['ok'=>true]);}
         elseif($m==='PATCH'&&$id&&$a==='rename'){$d=$this->json();$fm->rename($u['id'],$id,$d['name']??'');echo json_encode(['ok'=>true]);}
@@ -1092,7 +1099,7 @@ class Router {
     }
     private function trash(string $m,?int $id):void{
         $u=Auth::requireAuth();$db=Database::getInstance();$fm=new FileManager();
-        if($m==='GET'){echo json_encode(['ok'=>true,'files'=>$db->fetchAll("SELECT id,name,type,mime_type,size,trashed_at FROM files WHERE user_id=? AND is_trashed=1 ORDER BY trashed_at DESC",[$u['id']])]);}
+        if($m==='GET'){echo json_encode(['ok'=>true,'files'=>$db->fetchAll("SELECT f.id,f.name,f.type,f.mime_type,f.size,f.trashed_at,f.updated_at,f.created_at,u.display_name AS owner_name,u.username AS owner_username,(SELECT COUNT(*) FROM shares s WHERE s.file_id=f.id) AS share_count,CASE WHEN f.type='folder' THEN (SELECT COUNT(*) FROM files c WHERE c.parent_id=f.id AND c.user_id=f.user_id) ELSE NULL END AS item_count FROM files f JOIN users u ON u.id=f.user_id WHERE f.user_id=? AND f.is_trashed=1 ORDER BY f.trashed_at DESC",[$u['id']])]);}
         elseif($m==='POST'&&$id){$fm->restore($u['id'],$id);echo json_encode(['ok'=>true]);}
         elseif($m==='DELETE'&&$id){$fm->delete($u['id'],$id);echo json_encode(['ok'=>true]);}
         elseif($m==='DELETE'&&!$id){foreach($db->fetchAll("SELECT id FROM files WHERE user_id=? AND is_trashed=1",[$u['id']]) as $it)$fm->delete($u['id'],$it['id']);echo json_encode(['ok'=>true]);}
@@ -1678,6 +1685,35 @@ tr:last-child td{border:none}tr:hover td{background:var(--surface2)}
   .ft{height:80px;font-size:28px}
   .tbar h2{font-size:16px}
 }
+
+/* ──────────────────────────────────────────────────────────────────────────
+   Vault OneDrive Phase 1 — UI neutra, tabla principal y subida discreta
+   Autor: Yansy Rodriguez · Assisted by ChatGPT
+   ────────────────────────────────────────────────────────────────────────── */
+:root{
+  --bg:#f7f7f8;--surface:#ffffff;--surface2:#f3f2f1;--surface3:#edebe9;
+  --border:#e1dfdd;--border2:#c8c6c4;--accent:#2563eb;--accent2:#3730a3;
+  --accent-grad:linear-gradient(135deg,#0f6cbd,#2b2fbb);--accent-dim:#e8f2ff;
+  --text:#1f1f1f;--muted:#605e5c;--muted2:#8a8886;--danger:#c50f1f;--success:#107c10;
+  --sidebar-w:292px;
+}
+[data-theme="light"],html[data-theme="light"]{
+  --bg:#f7f7f8;--surface:#ffffff;--surface2:#f3f2f1;--surface3:#edebe9;
+  --border:#e1dfdd;--border2:#c8c6c4;--accent:#0f6cbd;--accent2:#3730a3;
+  --accent-grad:linear-gradient(135deg,#0f6cbd,#3730a3);--accent-dim:#e8f2ff;
+  --text:#1f1f1f;--muted:#605e5c;--muted2:#8a8886;--danger:#c50f1f;--success:#107c10;
+}
+body{background:var(--bg);font-size:15px;color:var(--text)}
+.sidebar{background:#f7f7f8;border-right:1px solid #e6e6e6;padding:20px 10px 12px;gap:8px}
+.sh{border:0;padding:0 8px 10px}.brand .logo{display:none}.brand .name{background:none!important;-webkit-text-fill-color:initial;color:#111;font-size:14px;font-family:'Inter',sans-serif;font-weight:700}
+.od-create-wrap{position:relative;margin:4px 6px 22px}.od-create{height:42px;padding:0 18px;border:0;border-radius:22px;background:linear-gradient(135deg,#0078d4,#3730a3);color:#fff;font-weight:700;font-size:14px;display:inline-flex;align-items:center;gap:9px;cursor:pointer;box-shadow:0 1px 2px rgba(0,0,0,.10)}
+.od-create svg{width:18px;height:18px}.od-menu{display:none;position:absolute;top:48px;left:0;width:268px;background:#fff;border:1px solid #e5e5e5;border-radius:8px;box-shadow:0 8px 30px rgba(0,0,0,.16);z-index:2200;padding:8px 0}.od-menu.show{display:block}.od-mi{display:flex;align-items:center;gap:12px;padding:12px 16px;color:#323130;cursor:pointer;font-size:14px}.od-mi:hover{background:#f3f2f1}.od-mi .ico{width:20px;text-align:center}.od-sep{height:1px;background:#edebe9;margin:4px 10px}
+.nav{padding:0 0 8px}.ns{font-size:14px;color:#111;text-transform:none;letter-spacing:0;font-weight:700;margin:18px 8px 8px;padding:0}.ns.od-muted{font-size:13px;color:#605e5c;margin-top:24px}.ni{border-radius:6px;color:#242424;font-size:15px;font-weight:400;padding:9px 10px;margin:2px 0;position:relative}.ni:hover{background:#edebe9}.ni.active{background:#edebe9;color:#111;font-weight:600;box-shadow:inset 2px 0 0 #0078d4}.ni svg{width:20px;height:20px;color:#424242}.sf{border-top:1px solid #e1dfdd;padding:12px 8px 0}.ql,.un{color:#323130}.qb{background:#edebe9}.qf{background:#8a8886}.av{background:#0f6cbd;color:#fff}.lb{color:#605e5c}
+.main{background:#fff}.topbar{height:72px;background:#fff;border-bottom:0;padding:0 20px}.sw{max-width:520px}.sw input{height:40px;background:#f7f7f8;border-color:#e1dfdd;border-radius:8px;font-size:14px}.sw input:focus{background:#fff;border-color:#0f6cbd;box-shadow:0 0 0 1px #0f6cbd}.tr{gap:10px}.bi{border:0;background:#fff;color:#323130;width:auto;min-width:34px;height:34px;border-radius:5px;padding:0 8px}.bi:hover{background:#f3f2f1}.top-label{font-size:14px;margin-left:5px}.vt{background:#fff;border:0;padding:0;gap:2px}.vb{height:34px;border-radius:5px;padding:7px 9px}.vb.active{background:#edebe9}.content{background:#fff;padding:0 20px 24px}.tbar{height:52px;margin:0;align-items:center}.tbar h2{font-family:'Inter',sans-serif;font-size:21px;font-weight:700;color:#111}.page#page-files>.tbar .btn{display:none}.bc{margin:0 0 8px;color:#605e5c}.btn{border-radius:6px}.bp{background:#0f6cbd;box-shadow:none}.bp:hover{background:#115ea3;box-shadow:none;transform:none}.bs{background:#fff;border:1px solid #e1dfdd}.bd{background:#fff4f4;color:#c50f1f;border-color:#f1bbbb}
+.fl{gap:0;border:1px solid #e5e5e5;border-radius:10px;overflow:hidden;background:#fff}.flh{display:grid;grid-template-columns:42px minmax(260px,1.9fr) minmax(130px,.85fr) minmax(150px,.9fr) minmax(110px,.6fr) minmax(120px,.7fr) minmax(170px,.9fr);align-items:center;height:52px;border-bottom:1px solid #e5e5e5;background:#fff;color:#323130;font-size:14px;font-weight:600}.flh div{padding:0 14px}.flh .sort:after{content:'⌄';font-size:12px;margin-left:6px;color:#605e5c}.fr{display:grid;grid-template-columns:42px minmax(260px,1.9fr) minmax(130px,.85fr) minmax(150px,.9fr) minmax(110px,.6fr) minmax(120px,.7fr) minmax(170px,.9fr);gap:0;min-height:52px;padding:0;border:0;border-radius:0;border-bottom:1px solid #edebe9;background:#fff}.fr:hover{background:#f8f8f8;border-color:#edebe9}.fr>div{padding:0 14px;display:flex;align-items:center}.fr .rsel{justify-content:center;padding:0}.fr .ri{display:none}.fr .rn{font-size:15px;font-weight:400;color:#242424;gap:12px}.fr .rn .fileico{font-size:24px;width:28px;display:inline-flex;justify-content:center}.fr .rd,.fr .rs,.fr .rmod,.fr .rshare,.fr .ract{width:auto;text-align:left;color:#605e5c;font-size:14px}.fr .ra{display:none!important}.fg{grid-template-columns:repeat(auto-fill,minmax(170px,1fr));gap:14px}.fc{border-color:#e5e5e5;border-radius:8px;box-shadow:none}.fc:hover{transform:none;box-shadow:0 3px 10px rgba(0,0,0,.08);border-color:#c8c6c4}.ft{background:#fafafa}.fn{font-size:13px}.fm{font-size:12px}.selcheck,.rsel{color:#0f6cbd}.fr .rsel{opacity:0;display:flex!important;transition:opacity .12s ease,border-color .12s ease,background .12s ease}.fr:hover .rsel,.selmode .fr .rsel,.fr.sel .rsel{opacity:1}.fr .rsel.on{opacity:1;background:#0f6cbd;border-color:#0f6cbd}.fc .selcheck{background:#fff;border:1.5px solid #8a8886;color:#0f6cbd}.fc:hover .selcheck,.selmode .fc .selcheck,.fc.sel .selcheck{opacity:1}.fc .selcheck.on{background:#0f6cbd;border-color:#0f6cbd}.empty{color:#605e5c}.empty h3{font-family:'Inter',sans-serif;color:#242424}
+#uploadPanel{left:50%;right:auto;bottom:22px;transform:translateX(-50%);width:min(460px,92vw);border-radius:4px;background:#292827;color:#fff;border:0;box-shadow:0 8px 28px rgba(0,0,0,.28)}#uploadPanel .uph{border:0;padding:13px 16px;font-family:'Inter',sans-serif;font-weight:600}#uploadPanel .uph span{font-size:14px}#uploadPanel .uplist{padding:0 12px 12px}.upitem{background:#292827;color:#fff;padding:10px 4px}.upitem .upname{font-size:13px}.updest{color:#8ec7ff;font-weight:600}.upitem .upbar{background:#4a4948;height:3px}.upitem .upfill{background:#60a5fa}.upitem.done .upfill{background:#6ccb5f}.upitem.err .upfill{background:#ff7b72}.upitem .uppct{color:#d0d0d0}.upclose{color:#fff!important}.toast{border-radius:4px;background:#292827;color:#fff}.toast.success span:first-child{background:#6ccb5f;color:#111}.toast.error span:first-child{background:#ff7b72;color:#111}
+.ctxbar{border-radius:8px;background:#fff;color:#323130;border:1px solid #d0d7de;box-shadow:0 10px 34px rgba(15,23,42,.14),0 2px 8px rgba(15,23,42,.08)}.ctxbar .cnt{color:#242424;border-right-color:#e1dfdd}.ctxbar button{color:#323130}.ctxbar button:hover{background:#f3f2f1;color:#111}.ctxbar button.danger{color:#c50f1f}.ctxbar button.danger:hover{background:#fde7e9;color:#a80000}.ctxbar .div{background:#e1dfdd}.ctx{border-radius:6px;border:1px solid #e5e5e5;box-shadow:0 10px 32px rgba(0,0,0,.16)}.cxi:hover{background:#f3f2f1}.mo{background:rgba(0,0,0,.38)}.md{border-radius:8px;box-shadow:0 24px 60px rgba(0,0,0,.28)}.md h3{font-family:'Inter',sans-serif}.uz{border-radius:8px;background:#fafafa}.uz:hover{background:#f3f2f1}
+@media(max-width:980px){:root{--sidebar-w:280px}.flh{display:none}.fr{grid-template-columns:42px minmax(180px,1fr) 100px}.fr .rmod,.fr .rshare,.fr .ract{display:none}.fr .rs{font-size:13px}.sidebar{position:fixed;z-index:900;inset:0 auto 0 0;transform:translateX(-105%);box-shadow:12px 0 30px rgba(0,0,0,.18)}.sidebar.open{transform:translateX(0)}.hbtn{display:flex}.topbar{height:62px}.content{padding:0 12px 18px}}
 </style></head>
 <body>
 <!-- Overlay para cerrar sidebar en móvil -->
@@ -1685,16 +1721,26 @@ tr:last-child td{border:none}tr:hover td{background:var(--surface2)}
 <!-- Ghost de drag interno -->
 <div id="dragGhost"></div>
 <aside class="sidebar" id="sidebar">
-<div class="sh"><div class="brand"><div class="logo"><svg width="22" height="22" viewBox="0 0 24 24" fill="none"><path d="M12 3 L19 6 V11 C19 15.5 16 19 12 21 C8 19 5 15.5 5 11 V6 Z" stroke="#fff" stroke-width="2" stroke-linejoin="round"/><path d="M9 11.5 l2 2 l4-4.5" stroke="#fff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg></div><span class="name"><?=h($appName)?></span></div></div>
+<div class="od-create-wrap">
+  <button class="od-create" onclick="toggleCreateMenu(event)"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4"><path d="M12 5v14M5 12h14"/></svg> Crear o subir</button>
+  <div class="od-menu" id="createMenu">
+    <div class="od-mi" onclick="closeCreateMenu();showNewFolder()"><span class="ico">📁</span><span>Carpeta</span></div>
+    <div class="od-sep"></div>
+    <div class="od-mi" onclick="closeCreateMenu();showUpload()"><span class="ico">📄</span><span>Subir archivos</span></div>
+    <div class="od-mi" onclick="closeCreateMenu();showFolderUpload()"><span class="ico">🗂️</span><span>Subir carpeta</span></div>
+  </div>
+  <input type="file" id="folderUploadInput" multiple webkitdirectory directory style="display:none" onchange="handleFiles(this.files);this.value=''">
+</div>
+<div class="sh"><div class="brand"><div class="logo"><svg width="22" height="22" viewBox="0 0 24 24" fill="none"><path d="M12 3 L19 6 V11 C19 15.5 16 19 12 21 C8 19 5 15.5 5 11 V6 Z" stroke="#fff" stroke-width="2" stroke-linejoin="round"/><path d="M9 11.5 l2 2 l4-4.5" stroke="#fff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg></div><span class="name"><?=h($userName)?></span></div></div>
 <nav class="nav">
-<div class="ns">Mis archivos</div>
-<div class="ni active" onclick="showPage('files');closeSidebar()" data-page="files"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 9l9-7 9 7v11a2 2 0 01-2 2H5a2 2 0 01-2-2z"/></svg> Inicio</div>
-<div class="ni" onclick="showPage('starred');closeSidebar()" data-page="starred"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2l3 7h7l-5.5 4 2 7L12 16l-6.5 4 2-7L2 9h7z"/></svg> Destacados</div>
+<div class="ni" onclick="showPage('files');loadFiles(null);closeSidebar()" data-page="home"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 9l9-7 9 7v11a2 2 0 01-2 2H5a2 2 0 01-2-2z"/></svg> Home</div>
+<div class="ni active" onclick="showPage('files');closeSidebar()" data-page="files"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 7h6l2 3h10v8a2 2 0 01-2 2H5a2 2 0 01-2-2V7z"/></svg> Mis archivos</div>
+<div class="ni" onclick="showPage('starred');closeSidebar()" data-page="starred"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2l3 7h7l-5.5 4 2 7L12 16l-6.5 4 2-7L2 9h7z"/></svg> Favoritos</div>
 <div class="ni" onclick="showPage('shares');closeSidebar()" data-page="shares"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M10 13a5 5 0 007 0l3-3a5 5 0 00-7-7l-1 1"/><path d="M14 11a5 5 0 00-7 0l-3 3a5 5 0 007 7l1-1"/></svg> Compartidos</div>
-<div class="ni" onclick="showPage('trash');closeSidebar()" data-page="trash"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 6h18M19 6l-1 14a2 2 0 01-2 2H8a2 2 0 01-2-2L5 6m3 0V4a2 2 0 012-2h4a2 2 0 012 2v2"/></svg> Papelera</div>
-<?php if($isAdmin):?><div class="ns">Administración</div>
+<div class="ni" onclick="showPage('trash');closeSidebar()" data-page="trash"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 6h18M19 6l-1 14a2 2 0 01-2 2H8a2 2 0 01-2-2L5 6m3 0V4a2 2 0 012-2h4a2 2 0 012 2v2"/></svg> Papelera de reciclaje</div>
+<?php if($isAdmin):?><div class="ns od-muted">Administración</div>
 <div class="ni" onclick="showPage('admin');closeSidebar()" data-page="admin"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19 12a7 7 0 00-.1-1l2-1.5-2-3.5-2.4 1a7 7 0 00-1.7-1L14.5 2h-5l-.3 2.5a7 7 0 00-1.7 1l-2.4-1-2 3.5 2 1.5a7 7 0 000 2l-2 1.5 2 3.5 2.4-1a7 7 0 001.7 1l.3 2.5h5l.3-2.5a7 7 0 001.7-1l2.4 1 2-3.5-2-1.5a7 7 0 00.1-1z"/></svg> Panel admin</div><?php endif;?>
-<div class="ns">Cuenta</div>
+<div class="ns od-muted">Cuenta</div>
 <div class="ni" onclick="showPage('settings');closeSidebar()" data-page="settings"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="8" r="4"/><path d="M4 21v-1a6 6 0 016-6h4a6 6 0 016 6v1"/></svg> Ajustes</div>
 </nav>
 <div class="sf">
@@ -1708,15 +1754,16 @@ tr:last-child td{border:none}tr:hover td{background:var(--surface2)}
 <button class="hbtn" id="hbtn" onclick="openSidebar()" title="Menú"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 12h18M3 6h18M3 18h18"/></svg></button>
 <div class="sw"><svg class="si" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><path d="M21 21l-4-4"/></svg><input type="search" id="searchInput" name="vault_search" placeholder="Buscar archivos..." autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" oninput="debSearch(this.value)"><button class="clr" id="clrBtn" onclick="clearSearch()"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 6L6 18M6 6l12 12"/></svg></button></div>
 <div class="tr">
-<button class="bi" id="topUploadBtn" onclick="showUpload()" title="Subir"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4M17 8l-5-5-5 5M12 3v12"/></svg></button>
-<button class="bi" id="topFolderBtn" onclick="showNewFolder()" title="Nueva carpeta"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 19a2 2 0 01-2 2H4a2 2 0 01-2-2V5a2 2 0 012-2h5l2 3h9a2 2 0 012 2zM12 11v6M9 14h6"/></svg></button>
+<button class="bi" id="sortBtn" onclick="toast('Ordenación avanzada en la próxima fase','info')" title="Ordenar"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M11 5h10M11 12h7M11 19h4M4 5v14M2 17l2 2 2-2"/></svg><span class="top-label">Ordenar</span></button>
+<button class="bi" id="topUploadBtn" onclick="showUpload()" title="Subir" style="display:none"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4M17 8l-5-5-5 5M12 3v12"/></svg></button>
+<button class="bi" id="topFolderBtn" onclick="showNewFolder()" title="Nueva carpeta" style="display:none"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 19a2 2 0 01-2 2H4a2 2 0 01-2-2V5a2 2 0 012-2h5l2 3h9a2 2 0 012 2zM12 11v6M9 14h6"/></svg></button>
 <div class="vt" id="mainViewToggle"><button class="vb active" id="gvBtn" onclick="setView('grid')"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/></svg></button><button class="vb" id="lvBtn" onclick="setView('list')"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M8 6h13M8 12h13M8 18h13M3 6h.01M3 12h.01M3 18h.01"/></svg></button></div>
-<button class="bi" id="themeBtn" onclick="toggleTheme()"></button>
-<button class="bi" onclick="showPage('settings')" title="Ajustes"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19 12a7 7 0 00-.1-1l2-1.5-2-3.5-2.4 1a7 7 0 00-1.7-1L14.5 2h-5l-.3 2.5a7 7 0 00-1.7 1l-2.4-1-2 3.5 2 1.5a7 7 0 000 2l-2 1.5 2 3.5 2.4-1a7 7 0 001.7 1l.3 2.5h5l.3-2.5a7 7 0 001.7-1l2.4 1 2-3.5-2-1.5a7 7 0 00.1-1z"/></svg></button>
+<button class="bi" id="detailsBtn" onclick="toast('Panel de detalles en la fase 2','info')" title="Detalles"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 4h16v16H4z"/><path d="M15 4v16"/></svg><span class="top-label">Detalles</span></button>
+<button class="bi" id="themeBtn" onclick="toggleTheme()" title="Tema"></button>
 </div>
 </div>
 <div class="content">
-<div class="page active" id="page-files"><div class="tbar"><h2 id="ftitle">Mis archivos</h2><button class="btn bs" onclick="showNewFolder()">Nueva carpeta</button><button class="btn bp" onclick="showUpload()">Subir</button></div><div class="bc" id="bc"></div><div id="fc"></div></div>
+<div class="page active" id="page-files"><div class="tbar"><h2 id="ftitle">Mis archivos</h2></div><div class="bc" id="bc"></div><div id="fc"></div></div>
 <div class="page" id="page-starred"><div class="tbar"><h2>Destacados</h2></div><div id="sc"></div></div>
 <div class="page" id="page-shares"><div class="tbar"><h2>Links compartidos</h2></div><div id="shc"></div></div>
 <div class="page" id="page-trash">
@@ -1744,13 +1791,13 @@ tr:last-child td{border:none}tr:hover td{background:var(--surface2)}
 <div class="viewer" id="viewer"><div class="viewer-top"><span class="vtitle" id="vTitle"></span><button class="vbtn" onclick="viewerDownload()" title="Descargar">⬇</button><button class="vbtn" onclick="closeViewer()" title="Cerrar">✕</button></div><div class="viewer-body" id="vBody"></div></div>
 <div class="ctxbar" id="ctxbar"><span class="cnt" id="selCount">0 seleccionados</span><button onclick="selectAllToggle()"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 11l3 3L22 4"/><path d="M21 12v7a2 2 0 01-2 2H5a2 2 0 01-2-2V5a2 2 0 012-2h11"/></svg> Todo</button><div class="div"></div><button onclick="bulkDownload()"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4M7 10l5 5 5-5M12 15V3"/></svg> Descargar</button><button onclick="bulkStar()"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2l3 7h7l-5.5 4 2 7L12 16l-6.5 4 2-7L2 9h7z"/></svg> Destacar</button><button onclick="bulkMove()"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M5 12h14M12 5l7 7-7 7"/></svg> Mover</button><button class="danger" onclick="bulkTrash()"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 6h18M19 6l-1 14a2 2 0 01-2 2H8a2 2 0 01-2-2L5 6"/></svg> Papelera</button><div class="div"></div><button onclick="clearSelection()">✕ Cancelar</button></div>
 <!-- Panel de progreso de subida -->
-<div id="uploadPanel"><div class="uph"><span>Subiendo archivos</span><button class="upclose" onclick="document.getElementById('uploadPanel').classList.remove('show')">✕</button></div><div class="uplist" id="uplist"></div></div>
+<div id="uploadPanel"><div class="uph"><span>Actividad de subida</span><button class="upclose" onclick="document.getElementById('uploadPanel').classList.remove('show')">✕</button></div><div class="uplist" id="uplist"></div></div>
 VIEWEOF
 echo " [app.php cabecera+HTML escrito]"
 pct exec "$CT_ID" -- bash -c "cat >> /var/www/vault/src/views/app.php" << 'VIEWEOF'
 <script>
 /* ══ ESTADO GLOBAL ══ */
-const S={page:'files',fid:null,view:'grid',shareTarget:null,renameTarget:null,st:null,currentList:[],viewerIdx:-1,moveIds:[],cfAccept:null,cflRename:null,cflReplace:null,selected:new Set(),moveTarget:null,viewerCurrent:null};
+const S={page:'files',fid:null,view:'list',shareTarget:null,renameTarget:null,st:null,currentList:[],viewerIdx:-1,moveIds:[],cfAccept:null,cflRename:null,cflReplace:null,selected:new Set(),moveTarget:null,viewerCurrent:null};
 
 /* ══ API ══ */
 async function api(m,p,b){const o={method:m,headers:{}};if(b&&!(b instanceof FormData)){o.headers['Content-Type']='application/json';o.body=JSON.stringify(b);}else if(b)o.body=b;try{const r=await fetch('/api/'+p,o);const txt=await r.text();let d;try{d=JSON.parse(txt);}catch(e){return{ok:false,message:'Respuesta no válida'+(txt?': '+txt.slice(0,120):'')};}return d;}catch(e){return{ok:false,message:'Error de conexión'};}}
@@ -1761,6 +1808,10 @@ function toast(msg,type='info',dur=3500){const ic={success:'✓',error:'✕',inf
 /* ══ SIDEBAR MÓVIL ══ */
 function openSidebar(){document.getElementById('sidebar').classList.add('open');document.getElementById('sideOverlay').classList.add('show');}
 function closeSidebar(){document.getElementById('sidebar').classList.remove('open');document.getElementById('sideOverlay').classList.remove('show');}
+function toggleCreateMenu(e){if(e)e.stopPropagation();document.getElementById('createMenu')?.classList.toggle('show');}
+function closeCreateMenu(){document.getElementById('createMenu')?.classList.remove('show');}
+function showFolderUpload(){toast('La subida de carpeta se añadirá a la carpeta actual','info');document.getElementById('folderUploadInput')?.click();}
+document.addEventListener('click',e=>{if(!e.target.closest('.od-create-wrap'))closeCreateMenu();});
 
 /* ══ NAVEGACIÓN ══ */
 function syncTopbar(){
@@ -1768,9 +1819,9 @@ function syncTopbar(){
   const topFolder=document.getElementById('topFolderBtn');
   const mainToggle=document.getElementById('mainViewToggle');
   const filePages=['files','starred','search','trash'];
-  const canCreate=S.page==='files';
-  if(topUpload)topUpload.style.display=canCreate?'inline-flex':'none';
-  if(topFolder)topFolder.style.display=canCreate?'inline-flex':'none';
+  const canCreate=false;
+  if(topUpload)topUpload.style.display='none';
+  if(topFolder)topFolder.style.display='none';
   if(mainToggle)mainToggle.style.display=filePages.includes(S.page)?'flex':'none';
   document.getElementById('gvBtn')?.classList.toggle('active',(S.page==='trash'?TS.view:S.view)==='grid');
   document.getElementById('lvBtn')?.classList.toggle('active',(S.page==='trash'?TS.view:S.view)==='list');
@@ -1802,11 +1853,11 @@ function showPage(n){
 async function loadFiles(fid){clearSelection();if(fid!==undefined)S.fid=fid??null;const url='files'+(S.fid?`?folder=${S.fid}`:'');const d=await api('GET',url);if(!d.ok)return toast(d.error||'Error','error');renderBC(d.breadcrumb||[]);S.currentList=d.files||[];renderFiles(d.files||[],'fc');document.getElementById('ftitle').textContent=S.fid&&d.breadcrumb?.length?d.breadcrumb[d.breadcrumb.length-1].name:'Mis archivos';}
 function reloadCurrent(){if(S.page==='files')loadFiles();else if(S.page==='starred')loadStarred();else if(S.page==='trash')loadTrash();}
 function renderBC(c){const el=document.getElementById('bc');let h=`<span onclick="loadFiles(null)">Inicio</span>`;c.forEach(cr=>{h+=`<span class="sep">›</span><span onclick="loadFiles(${cr.id})">${H(cr.name)}</span>`;});el.innerHTML=h;}
-function renderFiles(files,cid){const el=document.getElementById(cid);if(!files.length){el.innerHTML=`<div class="empty"><div class="ei">📂</div><h3>Carpeta vacía</h3><p>Sube archivos o crea una carpeta</p></div>`;return;}if(S.view==='grid'){el.innerHTML=`<div class="fg">${files.map(f=>fCard(f)).join('')}</div>`;}else{el.innerHTML=`<div class="fl">${files.map(f=>fRow(f)).join('')}</div>`;}applySelectionUI();initInternalDrag();}
+function renderFiles(files,cid){const el=document.getElementById(cid);if(!files.length){el.innerHTML=`<div class="empty"><div class="ei">📂</div><h3>Carpeta vacía</h3><p>Sube archivos o crea una carpeta</p></div>`;return;}if(S.view==='grid'){el.innerHTML=`<div class="fg">${files.map(f=>fCard(f)).join('')}</div>`;}else{const head=`<div class="flh"><div></div><div class="sort">Nombre</div><div class="sort">Modificado</div><div class="sort">Modificado por</div><div class="sort">Tamaño</div><div class="sort">Compartido</div><div>Actividad</div></div>`;el.innerHTML=`<div class="fl">${head}${files.map(f=>fRow(f)).join('')}</div>`;}applySelectionUI();initInternalDrag();}
 
 /* ══ TARJETAS ══ */
 function fCard(f){const ic=f.type==='folder'?'📁':mIco(f.mime_type);const th=f.type==='file'&&f.thumbnail?`/api/thumb/${f.id}`:null;const chk='<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><path d="M5 12l5 5L20 6"/></svg>';return`<div class="fc" data-id="${f.id}" data-type="${f.type}" data-name="${H(f.name)}" onclick="cardClick(event,${f.id},'${f.type}','${esc(f.name)}','${f.mime_type||''}')" oncontextmenu="showCtx(event,${f.id},'${f.type}','${esc(f.name)}','${f.mime_type||''}')"><div class="selcheck" onclick="event.stopPropagation();toggleSelect(${f.id})">${chk}</div><div class="ft">${th?`<img src="${th}" loading="lazy">`:`<span>${ic}</span>`}${f.is_starred?'<span style="position:absolute;top:6px;right:6px;font-size:11px">⭐</span>':''}</div><div class="fi-b"><div class="fn" title="${H(f.name)}">${H(f.name)}</div><div class="fm">${f.type==='folder'?'Carpeta':szH(f.size)}</div></div><div class="fa"><button class="fab" onclick="event.stopPropagation();starFile(${f.id})" title="Destacar">⭐</button><button class="fab" onclick="event.stopPropagation();showShare(${f.id},'${esc(f.name)}','${f.type}')" title="Compartir">🔗</button><button class="fab" onclick="event.stopPropagation();moveOne(${f.id})" title="Mover">↪</button><button class="fab" onclick="event.stopPropagation();trashIt(${f.id})" title="Papelera">🗑</button></div></div>`;}
-function fRow(f){const chk='<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><path d="M5 12l5 5L20 6"/></svg>';return`<div class="fr" data-id="${f.id}" data-type="${f.type}" data-name="${H(f.name)}" onclick="cardClick(event,${f.id},'${f.type}','${esc(f.name)}','${f.mime_type||''}')" oncontextmenu="showCtx(event,${f.id},'${f.type}','${esc(f.name)}','${f.mime_type||''}')"><div class="rsel" onclick="event.stopPropagation();toggleSelect(${f.id})">${chk}</div><div class="ri">${f.type==='folder'?'📁':mIco(f.mime_type)}</div><div class="rn">${H(f.name)}${f.is_starred?' ⭐':''}</div><div class="rs">${f.type==='folder'?'—':szH(f.size)}</div><div class="rd">${fmtD(f.updated_at||f.created_at)}</div><div class="ra"><button class="fab" onclick="event.stopPropagation();showShare(${f.id},'${esc(f.name)}','${f.type}')">🔗</button><button class="fab" onclick="event.stopPropagation();moveOne(${f.id})">↪</button><button class="fab" onclick="event.stopPropagation();trashIt(${f.id})">🗑</button></div></div>`;}
+function fRow(f){const chk='<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><path d="M5 12l5 5L20 6"/></svg>';const ico=f.type==='folder'?'📁':mIco(f.mime_type);const owner=H(f.owner_name||f.owner_username||'Usuario');const shared=parseInt(f.share_count||0)>0?'Compartido':'Privado';const size=f.type==='folder'?((f.item_count!==null&&f.item_count!==undefined)?(parseInt(f.item_count)==1?'1 elemento':parseInt(f.item_count||0)+' elementos'):'Carpeta'):szH(f.size);const activity=parseInt(f.share_count||0)>0?'Enlace activo':'';return`<div class="fr" data-id="${f.id}" data-type="${f.type}" data-name="${H(f.name)}" onclick="cardClick(event,${f.id},'${f.type}','${esc(f.name)}','${f.mime_type||''}')" oncontextmenu="showCtx(event,${f.id},'${f.type}','${esc(f.name)}','${f.mime_type||''}')"><div class="rsel" onclick="event.stopPropagation();toggleSelect(${f.id})">${chk}</div><div class="rn"><span class="fileico">${ico}</span><span>${H(f.name)}${f.is_starred?' ⭐':''}</span></div><div class="rd">${fmtD(f.updated_at||f.created_at)}</div><div class="rmod">${owner}</div><div class="rs">${size}</div><div class="rshare">${shared}</div><div class="ract">${activity}</div><div class="ra"><button class="fab" onclick="event.stopPropagation();showShare(${f.id},'${esc(f.name)}','${f.type}')">🔗</button><button class="fab" onclick="event.stopPropagation();moveOne(${f.id})">↪</button><button class="fab" onclick="event.stopPropagation();trashIt(${f.id})">🗑</button></div></div>`;}
 
 /* ══ SELECCIÓN ══ */
 function cardClick(e,id,type,name,mime){if(S.selected.size>0){toggleSelect(id);return;}openItem(id,type,name,mime);}
@@ -1838,6 +1889,7 @@ async function mkFolder(){const name=document.getElementById('fn').value.trim()|
 
 /* ══ SUBIDA DE ARCHIVOS ══ */
 function showUpload(){document.getElementById('mUpload').classList.add('open');}
+function currentFolderLabel(){const title=document.getElementById('ftitle')?.textContent?.trim();return title||'Mis archivos';}
 function handleFiles(files){
   if(!files||!files.length)return;
   closeModal('mUpload');
@@ -1845,33 +1897,38 @@ function handleFiles(files){
   const list=document.getElementById('uplist');
   panel.classList.add('show');
   const total=files.length;
+  const targetFid=S.fid||null;
+  const targetName=currentFolderLabel();
   let done=0;
-  function onFileDone(){done++;if(done>=total){setTimeout(()=>{panel.classList.remove('show');list.innerHTML='';},2200);}}
+  function onFileDone(){done++;if(done>=total){setTimeout(()=>{},2200);}}
   [...files].forEach(f=>{
     const id='up_'+Date.now()+'_'+Math.random().toString(36).slice(2);
     const item=document.createElement('div');item.className='upitem';item.id=id;
-    item.innerHTML=`<div class="upname">${H(f.name)}</div><div class="uprow"><div class="upbar"><div class="upfill" id="fill_${id}" style="width:0%"></div></div><div class="uppct" id="pct_${id}">0%</div></div>`;
+    const displayName=H(f.webkitRelativePath||f.name);
+    item.innerHTML=`<div class="upname"><span class="upstate">Uploading</span> <strong>${displayName}</strong> to <span class="updest">${H(targetName)}</span></div><div class="uprow"><div class="upbar"><div class="upfill" id="fill_${id}" style="width:0%"></div></div><div class="uppct" id="pct_${id}">0%</div></div>`;
     list.appendChild(item);
-    uploadOne(f,id,onFileDone);
+    uploadOne(f,id,onFileDone,targetFid,targetName);
   });
 }
-async function uploadOne(file,itemId,onDone){
+async function uploadOne(file,itemId,onDone,targetFid,targetName){
 const CHUNK=5*1024*1024;
 const fill=document.getElementById('fill_'+itemId);
 const pct=document.getElementById('pct_'+itemId);
 const item=document.getElementById(itemId);
 function setP(p){if(fill)fill.style.width=p+'%';if(pct)pct.textContent=Math.round(p)+'%';}
+function markDone(){if(item){item.classList.add('done');const st=item.querySelector('.upstate');if(st)st.textContent='Uploaded';setP(100);}if(S.page==='files'&&(S.fid||null)===(targetFid||null))loadFiles(targetFid||null);if(typeof onDone==='function')onDone();}
+function markErr(msg){if(item)item.classList.add('err');toast(msg,'error');if(typeof onDone==='function')onDone();}
 if(file.size<=CHUNK){
-  const fd=new FormData();fd.append('file',file);if(S.fid)fd.append('folder_id',S.fid);
-  await new Promise(res=>{const xhr=new XMLHttpRequest();xhr.upload.onprogress=e=>{if(e.lengthComputable)setP(e.loaded/e.total*100);};xhr.onload=()=>{if(xhr.status===200){if(item)item.classList.add('done');}else{if(item)item.classList.add('err');toast('Error subiendo '+file.name,'error');}res();};xhr.onerror=()=>{if(item)item.classList.add('err');res();};xhr.open('POST','/api/upload');xhr.send(fd);});
-  reloadCurrent();if(typeof onDone==='function')onDone();return;
+  const fd=new FormData();fd.append('file',file);if(targetFid)fd.append('folder_id',targetFid);
+  await new Promise(res=>{const xhr=new XMLHttpRequest();xhr.upload.onprogress=e=>{if(e.lengthComputable)setP(e.loaded/e.total*100);};xhr.onload=()=>{if(xhr.status===200){markDone();}else{markErr('Error subiendo '+file.name);}res();};xhr.onerror=()=>{markErr('Error subiendo '+file.name);res();};xhr.open('POST','/api/upload');xhr.send(fd);});
+  return;
 }
 const total=Math.ceil(file.size/CHUNK);
 const uploadId=(crypto.randomUUID?crypto.randomUUID():Date.now().toString(36)+Math.random().toString(36).slice(2));
 let ok=true;
 for(let i=0;i<total&&ok;i++){
   const start=i*CHUNK;const chunk=file.slice(start,Math.min(start+CHUNK,file.size));
-  const fd=new FormData();fd.append('upload_id',uploadId);fd.append('chunk_index',i);fd.append('total_chunks',total);fd.append('file_name',file.name);fd.append('file_size',file.size);if(S.fid)fd.append('folder_id',S.fid);fd.append('chunk',chunk);
+  const fd=new FormData();fd.append('upload_id',uploadId);fd.append('chunk_index',i);fd.append('total_chunks',total);fd.append('file_name',file.name);fd.append('file_size',file.size);if(targetFid)fd.append('folder_id',targetFid);fd.append('chunk',chunk);
   let tries=0;let sent=false;
   while(tries<3&&!sent){
     try{
@@ -1880,17 +1937,16 @@ for(let i=0;i<total&&ok;i++){
       if(d.ok)sent=true;else{tries++;await new Promise(r=>setTimeout(r,800));}
     }catch(e){tries++;await new Promise(r=>setTimeout(r,800));}
   }
-  if(!sent){if(item)item.classList.add('err');toast('Error subiendo '+file.name+' (chunk '+i+')','error');ok=false;break;}
+  if(!sent){markErr('Error subiendo '+file.name+' (chunk '+i+')');ok=false;break;}
   setP((i+1)/total*95);
 }
 if(!ok)return;
 try{
-  const r=await fetch('/api/upload-complete',{method:'POST',credentials:'same-origin',headers:{'Content-Type':'application/json'},body:JSON.stringify({upload_id:uploadId,file_name:file.name,file_size:file.size,total_chunks:total,folder_id:S.fid||null})});
+  const r=await fetch('/api/upload-complete',{method:'POST',credentials:'same-origin',headers:{'Content-Type':'application/json'},body:JSON.stringify({upload_id:uploadId,file_name:file.name,file_size:file.size,total_chunks:total,folder_id:targetFid||null})});
   const d=await r.json();
-  if(d.ok){setP(100);if(item)item.classList.add('done');reloadCurrent();if(typeof onDone==='function')onDone();return;}
-  else{if(item)item.classList.add('err');toast('Error completando '+file.name+': '+(d.message||''),'error');}
-}catch(e){if(item)item.classList.add('err');toast('Error completando '+file.name,'error');}
-  if(typeof onDone==='function')onDone();
+  if(d.ok){markDone();return;}
+  else{markErr('Error completando '+file.name+': '+(d.message||''));}
+}catch(e){markErr('Error completando '+file.name);}
 }
 
 /* ══ COMPARTIR ══ */
@@ -1973,15 +2029,20 @@ async function loadTrash(){
       </div>`;
     }).join('')}</div>`;
   }else{
-    el.innerHTML=`<div class="fl">${files.map(f=>`
-      <div class="fr tc-item" data-id="${f.id}" onclick="trashToggleSel(${f.id})">
+    const head=`<div class="flh"><div></div><div class="sort">Nombre</div><div class="sort">Eliminado</div><div class="sort">Modificado por</div><div class="sort">Tamaño</div><div>Estado</div><div>Acciones</div></div>`;
+    el.innerHTML=`<div class="fl">${head}${files.map(f=>{
+      const ico=f.type==='folder'?'📁':mIco(f.mime_type);
+      const owner=H(f.owner_name||f.owner_username||'Usuario');
+      const size=f.type==='folder'?((f.item_count!==null&&f.item_count!==undefined)?(parseInt(f.item_count)==1?'1 elemento':parseInt(f.item_count||0)+' elementos'):'Carpeta'):szH(f.size);
+      return`<div class="fr tc-item" data-id="${f.id}" onclick="trashToggleSel(${f.id})">
         <div class="rsel tc-sel" onclick="event.stopPropagation();trashToggleSel(${f.id})">${chk}</div>
-        <div class="ri">${f.type==='folder'?'📁':mIco(f.mime_type)}</div>
-        <div class="rn">${H(f.name)}</div>
-        <div class="rs">${f.type==='file'?szH(f.size):'—'}</div>
+        <div class="rn"><span class="fileico">${ico}</span><span>${H(f.name)}</span></div>
         <div class="rd">${fmtD(f.trashed_at)}</div>
-        <div class="ra" style="display:flex">${restBtn(f.id)}${delBtn(f.id)}</div>
-      </div>`).join('')}</div>`;
+        <div class="rmod">${owner}</div>
+        <div class="rs">${size}</div>
+        <div class="rshare">En papelera</div>
+        <div class="ract" style="gap:6px">${restBtn(f.id)}${delBtn(f.id)}</div>
+      </div>`;}).join('')}</div>`;
   }
   updateTrashBar();
 }
